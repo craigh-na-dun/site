@@ -1,0 +1,90 @@
+name: Publish signed site
+on:
+  workflow_dispatch:
+    inputs:
+      bundle: { description: 'Numeric ZIP asset ID', required: true, type: string }
+      manifest: { description: 'Numeric manifest asset ID', required: true, type: string }
+      signature: { description: 'Numeric detached signature asset ID', required: true, type: string }
+      digest: { description: 'Approved manifest SHA-256', required: true, type: string }
+permissions: {}
+concurrency:
+  group: pages-publication
+  cancel-in-progress: false
+jobs:
+  verify:
+    if: github.run_attempt == 1 && github.repository == 'craigh-na-dun/site' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 4
+    permissions:
+      contents: read
+    outputs:
+      sequence: ${{ steps.verify.outputs.sequence }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify the GitHub-signed writing App commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash templates/public-repo/owner-signature.sh commit
+      - id: verify
+        env:
+          BUNDLE: ${{ inputs.bundle }}
+          MANIFEST: ${{ inputs.manifest }}
+          SIGNATURE: ${{ inputs.signature }}
+          DIGEST: ${{ inputs.digest }}
+        run: bash templates/public-repo/fetch-public.sh
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9
+        with:
+          path: input/verified
+          include-hidden-files: true
+  reserve:
+    if: github.run_attempt == 1
+    needs: verify
+    runs-on: ubuntu-26.04
+    timeout-minutes: 2
+    permissions:
+      contents: write
+    steps:
+      - name: Reserve sequence once
+        env:
+          SEQUENCE: ${{ needs.verify.outputs.sequence }}
+          DIGEST: ${{ inputs.digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          file="pending-$SEQUENCE.txt"
+          echo "$DIGEST" > "$file"
+          gh release upload pages-assets-v1 "$file" --repo github.com/craigh-na-dun/site
+  deploy:
+    if: github.run_attempt == 1
+    needs: reserve
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346
+  receipt:
+    if: github.run_attempt == 1
+    needs: [verify, deploy]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 2
+    permissions:
+      contents: write
+    steps:
+      - name: Record served manifest on the existing anchor
+        env:
+          DIGEST: ${{ inputs.digest }}
+          SEQUENCE: ${{ needs.verify.outputs.sequence }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          file="receipt-$SEQUENCE.json"
+          curl --fail --silent --show-error --proto '=https' --max-time 20 --max-filesize 4096 \
+            "https://retrogamesphotogallery.pro/publication.json?verify=$GITHUB_RUN_ID" -o "$file"
+          test "$(sha256sum "$file" | cut -d' ' -f1)" = "$DIGEST"
+          gh release upload pages-assets-v1 "$file" --repo github.com/craigh-na-dun/site
