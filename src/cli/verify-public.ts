@@ -2,20 +2,16 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, openSync, closeSync, constants, fstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildPublicSite, type PublicBundle } from "../public-site/build.ts";
+import { inspectArchive } from "./site-archive.ts";
 import { admitPublication, digest, verifyPublicManifest, type PublicManifest } from "../public-site/manifest.ts";
 
-function readBounded(path: string, limit: number): Buffer {
+export function readBounded(path: string, limit: number): Buffer {
   const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = fstatSync(fd);
     if (!info.isFile() || info.size > limit) throw new Error("Invalid publication input");
     return readFileSync(fd);
   } finally { closeSync(fd); }
-}
-
-export function archiveCommand(script: string, mode: string, path: string, input: Buffer): Buffer {
-  return execFileSync("python3", [join(script, "archive.py"), mode, path], { input, timeout: 10000, stdio: ["pipe", "pipe", "pipe"] });
 }
 
 export function ownerSignature(script: string, manifest: string, signature: string): boolean {
@@ -31,15 +27,11 @@ export function ownerSignature(script: string, manifest: string, signature: stri
 
 export interface VerificationIO { script: string; verify: typeof ownerSignature }
 
-export function inspect(io: VerificationIO, zip: Buffer): PublicBundle {
-  return buildPublicSite(JSON.parse(archiveCommand(io.script, "inspect", "-", zip).toString()) as PublicBundle);
-}
-
 export async function readCandidate(dir: string, io: VerificationIO) {
   const zip = readBounded(join(dir, "bundle.zip"), 67584);
   const bytes = readBounded(join(dir, "manifest.json"), 4096);
   const sig = readBounded(join(dir, "manifest.asc"), 4096);
-  const bundle = inspect(io, zip);
+  const bundle = inspectArchive(zip);
   const manifest = await verifyPublicManifest(bundle, bytes.toString(), sig.toString(), (m, s) => io.verify(io.script, m, s));
   const prior = readBounded(join(dir, "previous.json"), 4096);
   const last = { sequence: (JSON.parse(prior.toString()) as { sequence: number }).sequence, digest: await digest(prior.toString()) };
